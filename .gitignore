@@ -1,0 +1,3 @@
+.venv/           # virtual-env folder
+.env             # secrets file
+__pycache__/     # Python byte-code cache
