@@ -28,12 +28,14 @@ services:
       - airflow-logs:/opt/airflow/logs
     ports:
       - "8080:8080"   # Airflow UI
+    # Run migrations, create user/connection once, then start webserver
     command: >
       bash -c "
       airflow db migrate &&
-      airflow users create --username admin --password admin \
-      --firstname default --lastname default \
-      --role Admin --email gmm.maire@gmail.com &&
+      airflow users list | grep -q '^admin ' ||
+        airflow users create --username admin --password admin --firstname Gabriel --lastname RainWise --role Admin --email you@example.com &&
+      airflow connections get 'postgres_rainwise' >/dev/null 2>&1 ||
+        airflow connections add 'postgres_rainwise' --conn-uri 'postgresql://airflow:airflow@postgres:5432/rainwise' &&
       airflow webserver"
 
   airflow-scheduler:
@@ -64,5 +66,5 @@ services:
       - "8501:8501"
 
 volumes:
-  pgdata:   # named volume lives under Docker Desktop VM
-  airflow-logs:       # named volume for logs
+  pgdata:         # named volume lives under Docker Desktop VM
+  airflow-logs:   # named volume for logs
