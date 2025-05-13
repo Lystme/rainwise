@@ -18,6 +18,7 @@ services:
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/rainwise
+      GX_CONN_STRING: postgresql+psycopg2://airflow:airflow@postgres:5432/rainwise
       AIRFLOW__WEBSERVER__LOAD_EXAMPLES: "False"
       AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
       AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
@@ -48,6 +49,7 @@ services:
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/rainwise
+      GX_CONN_STRING: postgresql+psycopg2://airflow:airflow@postgres:5432/rainwise
       AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
       AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
       OWM_API_KEY: ${OWM_API_KEY}

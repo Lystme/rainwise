@@ -18,7 +18,7 @@ datasources:
     datasource_class_name: Datasource
     execution_engine:
       class_name: SqlAlchemyExecutionEngine
-      connection_string: postgresql+psycopg2://airflow:airflow@postgres:5432/rainwise
+      connection_string: ${GX_CONN_STRING} # Different for docker and github CI - get the values from docker-compose.yml and ci.yml
     data_connectors:
       default_runtime_data_connector_name:
         class_name: RuntimeDataConnector

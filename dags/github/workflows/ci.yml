@@ -1,0 +1,58 @@
+name: CI          # Appears in GitHub Actions tab
+
+# 1) Run this workflow on every push or pull request to any branch
+on: [push, pull_request]
+
+jobs:
+  build-test-validate:
+    runs-on: ubuntu-latest
+    
+    env: 
+      GX_CONN_STRING: postgresql+psycopg2://airflow:airflow@localhost:5432/rainwise
+
+    # 2) Spin up a Postgres service in the VM so GX can query it
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: airflow
+          POSTGRES_PASSWORD: airflow
+          POSTGRES_DB: rainwise
+        ports: ['5432:5432']
+        # wait until postgres is ready before proceeding
+        options: >-
+          --health-cmd="pg_isready -U airflow"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      # 3) Get repository code
+      - uses: actions/checkout@v4
+
+      # 4) Install Python
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 5) Install requirements
+      - run: pip install -r requirements.txt
+
+      # 6) Load schema (create rainfall table) into CI Postgres
+      - name: Init database schema
+        run: |
+          psql postgresql://airflow:airflow@localhost:5432/rainwise \
+            -f dags/sql/create_rainfall_table.sql
+
+      # 7) Seed one fake row so GX has something to check
+      - name: Insert dummy rainfall row
+        run: |
+          psql postgresql://airflow:airflow@localhost:5432/rainwise \
+            -c "INSERT INTO public.rainfall (city, record_ts, rainfall_mm)
+                VALUES ('CI City', NOW(), 1.23);"
+
+      # 8) RUN GREAT EXPECTATIONS CHECKPOINT
+      - name: Run Great Expectations checkpoint
+        run: |
+          great_expectations checkpoint run rainfall_checkpoint \
+            --data-context-dir great_expectations
