@@ -54,5 +54,5 @@ jobs:
       # 8) RUN GREAT EXPECTATIONS CHECKPOINT
       - name: Run Great Expectations checkpoint
         run: |
-          great_expectations checkpoint run rainfall_checkpoint \
-            --data-context-dir great_expectations
+          cd great_expectations
+          great_expectations checkpoint run rainfall_checkpoint
