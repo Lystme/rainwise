@@ -4,3 +4,5 @@ apache-airflow==2.9.0
 apache-airflow-providers-postgres
 psycopg2-binary
 streamlit
+great_expectations
+airflow-provider-great-expectations

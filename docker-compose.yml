@@ -26,8 +26,10 @@ services:
       - ./dags:/opt/airflow/dags           # hot-reload DAGs
       - ./data:/opt/airflow/data           # share raw files
       - airflow-logs:/opt/airflow/logs
+      - ./great_expectations:/opt/airflow/great_expectations
     ports:
       - "8080:8080"   # Airflow UI
+      - "8888:8888"  # Jupyter
     # Run migrations, create user/connection once, then start webserver
     command: >
       bash -c "
@@ -53,6 +55,7 @@ services:
       - ./dags:/opt/airflow/dags
       - ./data:/opt/airflow/data
       - airflow-logs:/opt/airflow/logs
+      - ./great_expectations:/opt/airflow/great_expectations
     command: airflow scheduler
 
   streamlit:

@@ -27,6 +27,7 @@ Author
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.operators.postgres import PostgresOperator
+from great_expectations_provider.operators.great_expectations import GreatExpectationsOperator
 from datetime import datetime, timedelta, timezone
 import os, requests, json, pathlib, time, psycopg2
 
@@ -149,5 +150,15 @@ with DAG(
         python_callable=load_into_pg,
     )
 
+    # 4. Validate with GreatExpectation
+    validate_task = GreatExpectationsOperator(
+        task_id="validate_rainfall",
+        data_context_root_dir="/opt/airflow/great_expectations",
+        checkpoint_name="rainfall_checkpoint",
+        fail_task_on_validation_failure=True,   # pipeline fails if tests fail
+        return_json_dict=True,
+    )
+
+
     # Task dependencies
-    create_table >> extract_task >> load_task
+    create_table >> extract_task >> load_task >> validate_task
