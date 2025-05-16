@@ -65,6 +65,8 @@ services:
       context: .
       dockerfile: docker/streamlit.Dockerfile
     depends_on: [postgres]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://airflow:airflow@postgres:5432/rainwise
     volumes:
       - ./streamlit_app:/app    # auto-reload when app.py is edited
     ports:

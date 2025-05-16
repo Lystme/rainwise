@@ -15,7 +15,7 @@ WORKDIR /app
 # Install only what the Streamlit front-end needs.
 # ─────────────────────────────────────────────────────────────
 COPY requirements.txt .
-RUN pip install --no-cache-dir streamlit pandas requests
+RUN pip install --no-cache-dir streamlit streamlit-extras pandas requests sqlalchemy psycopg2-binary
 
 # ─────────────────────────────────────────────────────────────
 # APP SOURCE

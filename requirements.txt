@@ -1,8 +1,11 @@
 requests
 pandas
+matplotlib
 apache-airflow==2.9.0
 apache-airflow-providers-postgres
 psycopg2-binary
 streamlit
+streamlit-extras      # handy UI helpers
+sqlalchemy            # DB connector the easy way
 great_expectations
 airflow-provider-great-expectations

@@ -15,7 +15,7 @@ Task graph
        load_into_pg (PythonOperator)
 
 Execution schedule
-    └─ Cron : 10:00 every day (container time)
+    └─ Every 10 mins.
 
 Author
     Gabriel <gmm.maire@gmail.com>
@@ -39,6 +39,7 @@ COUNTRY_CODE = "FR"
 RAW_DIR = "/opt/airflow/data/raw"             # Docker-volume mount path
 PG_CONN_ID = "postgres_rainwise"              # set in docker-compose cmd
 SQL_TABLE_PATH = "sql/create_rainfall_table.sql"
+CREATE_MV_SQL_PATH = "sql/create_mv_rainfall_hourly.sql"
 DAG_ID = "rainfall_daily"
 
 # ---------------------------------------------------------------------------#
@@ -126,7 +127,7 @@ with DAG(
     dag_id=DAG_ID,
     default_args=default_args,
     start_date=datetime(2025, 5, 1),
-    schedule="0 10 * * *",      # daily at 10:00
+    schedule="*/10 * * * *",      # every 10 mins
     catchup=False,
     tags=["rainwise", "ingestion"],
 ) as dag:
@@ -138,19 +139,26 @@ with DAG(
         sql=SQL_TABLE_PATH,
     )
 
-    # 2. Extract from API & land raw JSON
+    # 2. Create a refined materialized view for faster querying
+    create_mv = PostgresOperator(
+        task_id="create_mv_hourly",
+        postgres_conn_id=PG_CONN_ID,
+        sql=CREATE_MV_SQL_PATH,
+    )
+
+    # 3. Extract from API & land raw JSON
     extract_task = PythonOperator(
         task_id="extract_openweather",
         python_callable=extract_openweather,
     )
 
-    # 3. Load into PostgreSQL
+    # 4. Load into PostgreSQL
     load_task = PythonOperator(
         task_id="load_into_pg",
         python_callable=load_into_pg,
     )
 
-    # 4. Validate with GreatExpectation
+    # 5. Validate with GreatExpectation
     validate_task = GreatExpectationsOperator(
         task_id="validate_rainfall",
         data_context_root_dir="/opt/airflow/great_expectations",
@@ -159,6 +167,13 @@ with DAG(
         return_json_dict=True,
     )
 
+    # 6. Refresh the materialized view
+    refresh_mv = PostgresOperator(
+        task_id="refresh_mv_hourly",
+        postgres_conn_id=PG_CONN_ID,
+        sql="REFRESH MATERIALIZED VIEW CONCURRENTLY public.mv_rainfall_hourly;",
+    )
+
 
     # Task dependencies
-    create_table >> extract_task >> load_task >> validate_task
+    create_table >> create_mv >> extract_task >> load_task >> validate_task >> refresh_mv
