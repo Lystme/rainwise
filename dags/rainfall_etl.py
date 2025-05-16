@@ -34,8 +34,21 @@ import os, requests, json, pathlib, time, psycopg2
 # ---------------------------------------------------------------------------#
 # Constants & configuration                                                  #
 # ---------------------------------------------------------------------------#
-CITY = "Biarritz"
-COUNTRY_CODE = "FR"
+CITIES = [
+    ("Biarritz",   "FR"),  # Europe
+    ("Bergen",     "NO"),  # Europe – rainiest
+    ("Vancouver",  "CA"),  # N-America
+    ("Seattle",    "US"),  # N-America
+    ("Bogota",     "CO"),  # S-America
+    ("Mumbai",     "IN"),  # Asia monsoon
+    ("Singapore",  "SG"),  # Equatorial
+    ("Tokyo",      "JP"),  # East Asia
+    ("Libreville", "GA"),  # Africa
+    ("Auckland",   "NZ"),  # Oceania
+    ("Cairns",     "AU"),  # Tropical AU
+    ("Kingston",   "JM"),  # Caribbean
+    ("Beirut",     "LB"),  # Mediterranean
+]
 RAW_DIR = "/opt/airflow/data/raw"             # Docker-volume mount path
 PG_CONN_ID = "postgres_rainwise"              # set in docker-compose cmd
 SQL_TABLE_PATH = "sql/create_rainfall_table.sql"
@@ -45,74 +58,128 @@ DAG_ID = "rainfall_daily"
 # ---------------------------------------------------------------------------#
 # Task helpers                                                               #
 # ---------------------------------------------------------------------------#
+
+# def extract_openweather(**context):
+#     """
+#     Extract a single weather snapshot and push a cleaned dict to XCom.
+#     Also writes a copy of the raw record to the landing zone for auditing.
+#     """
+#     api_key = os.environ.get("OWM_API_KEY")
+#     if not api_key:
+#         raise EnvironmentError("OWM_API_KEY not set in the container env")
+
+#     # Build API URL
+#     url = (
+#         "https://api.openweathermap.org/data/2.5/weather"
+#         f"?q={CITY},{COUNTRY_CODE}&appid={api_key}&units=metric"
+#     )
+
+#     # GET request (10-s timeout)
+#     resp = requests.get(url, timeout=10)
+#     resp.raise_for_status()
+#     data = resp.json()
+
+#     # Extract rainfall
+#     rain_mm = round(data.get("rain", {}).get("1h", 0.0), 2)
+
+#     payload = {
+#         "city": f"{CITY},{COUNTRY_CODE}",
+#         "record_ts": datetime.fromtimestamp(data["dt"], tz=timezone.utc),  # aware dt
+#         "rainfall_mm": rain_mm,
+#     }
+
+#     # Write to raw folder
+#     pathlib.Path(RAW_DIR).mkdir(parents=True, exist_ok=True)
+#     fname = f"{CITY.lower()}_{data['dt']}.json"
+#     with open(pathlib.Path(RAW_DIR, fname), "w") as fp:
+#         json.dump(payload, fp, indent=2, default=str)
+
+#     # Simple log for Airflow task output
+#     print(f"[extract] saved raw file → {fname}", flush=True)
+
+#     # Push to XCom for the next task
+#     context["ti"].xcom_push(key="rain_row", value=payload)
+
 def extract_openweather(**context):
     """
-    Extract a single weather snapshot and push a cleaned dict to XCom.
-    Also writes a copy of the raw record to the landing zone for auditing.
+    Loop over CITIES, hit API once per city, write raw JSON and
+    push a list of cleaned dicts to XCom.
     """
-    api_key = os.environ.get("OWM_API_KEY")
-    if not api_key:
-        raise EnvironmentError("OWM_API_KEY not set in the container env")
+    api_key = os.environ["OWM_API_KEY"]
+    rows = []
 
-    # Build API URL
-    url = (
-        "https://api.openweathermap.org/data/2.5/weather"
-        f"?q={CITY},{COUNTRY_CODE}&appid={api_key}&units=metric"
-    )
+    for city, country in CITIES:
+        url = (
+            "https://api.openweathermap.org/data/2.5/weather"
+            f"?q={city},{country}&appid={api_key}&units=metric"
+        )
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
 
-    # GET request (10-s timeout)
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
+        rain_mm = round(data.get("rain", {}).get("1h", 0.0), 2)
+        payload = {
+            "city": f"{city},{country}",
+            "record_ts": datetime.fromtimestamp(data["dt"], tz=timezone.utc),
+            "rainfall_mm": rain_mm,
+        }
 
-    # Extract rainfall
-    rain_mm = round(data.get("rain", {}).get("1h", 0.0), 2)
+        # raw landing (one file per city)
+        fname = f"{city.lower()}_{data['dt']}.json"
+        pathlib.Path(RAW_DIR).mkdir(parents=True, exist_ok=True)
+        with open(pathlib.Path(RAW_DIR, fname), "w") as fp:
+            json.dump(payload, fp, indent=2, default=str)
 
-    payload = {
-        "city": f"{CITY},{COUNTRY_CODE}",
-        "record_ts": datetime.fromtimestamp(data["dt"], tz=timezone.utc),  # aware dt
-        "rainfall_mm": rain_mm,
-    }
+        rows.append(payload)
+        print(f"[extract] {city}: {rain_mm} mm")
 
-    # Write to raw folder
-    pathlib.Path(RAW_DIR).mkdir(parents=True, exist_ok=True)
-    fname = f"{CITY.lower()}_{data['dt']}.json"
-    with open(pathlib.Path(RAW_DIR, fname), "w") as fp:
-        json.dump(payload, fp, indent=2, default=str)
+    # push list of dicts
+    context["ti"].xcom_push(key="rain_rows", value=rows)
 
-    # Simple log for Airflow task output
-    print(f"[extract] saved raw file → {fname}", flush=True)
+# def load_into_pg(**context):
+#     """
+#     Pull the dict from XCom and insert it into public.rainfall.
+#     Uses ON CONFLICT DO NOTHING to avoid duplicate rows if DAG is retried.
+#     """
+#     row = context["ti"].xcom_pull(key="rain_row", task_ids="extract_openweather")
+#     if not row:
+#         raise ValueError("No XCom payload received from extract task")
 
-    # Push to XCom for the next task
-    context["ti"].xcom_push(key="rain_row", value=payload)
-
+#     conn = psycopg2.connect(
+#         dbname="rainwise", user="airflow", password="airflow", host="postgres"
+#     )
+#     with conn:
+#         with conn.cursor() as cur:
+#             cur.execute(
+#                 """
+#                 INSERT INTO public.rainfall (city, record_ts, rainfall_mm)
+#                 VALUES (%(city)s, %(record_ts)s, %(rainfall_mm)s)
+#                 ON CONFLICT DO NOTHING;
+#                 """,
+#                 row,
+#             )
+#     conn.close()
+#     print(f"Inserted rainfall row for {row['city']} @ {row['record_ts']}")
 
 def load_into_pg(**context):
-    """
-    Pull the dict from XCom and insert it into public.rainfall.
-    Uses ON CONFLICT DO NOTHING to avoid duplicate rows if DAG is retried.
-    """
-    row = context["ti"].xcom_pull(key="rain_row", task_ids="extract_openweather")
-    if not row:
-        raise ValueError("No XCom payload received from extract task")
+    rows = context["ti"].xcom_pull(key="rain_rows", task_ids="extract_openweather")
+    if not rows:
+        raise ValueError("No rows from extractor")
 
-    conn = psycopg2.connect(
-        dbname="rainwise", user="airflow", password="airflow", host="postgres"
-    )
+    conn = psycopg2.connect(dbname="rainwise", user="airflow",
+                            password="airflow", host="postgres")
     with conn:
         with conn.cursor() as cur:
-            cur.execute(
+            cur.executemany(
                 """
                 INSERT INTO public.rainfall (city, record_ts, rainfall_mm)
                 VALUES (%(city)s, %(record_ts)s, %(rainfall_mm)s)
                 ON CONFLICT DO NOTHING;
                 """,
-                row,
+                rows,
             )
     conn.close()
-    print(f"Inserted rainfall row for {row['city']} @ {row['record_ts']}")
-    #print("[load] inserted row into public.rainfall", flush=True)
-
+    print(f"[load] inserted {len(rows)} rows")
 
 # ---------------------------------------------------------------------------#
 # DAG definition                                                             #

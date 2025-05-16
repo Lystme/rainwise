@@ -1,62 +1,59 @@
 """
 RainWise : Interactive Rainfall Dashboard
 -----------------------------------------
-
 Live & historical rainfall insights powered by:
 
-    • raw 10-minute readings          : public.rainfall      (bronze)
-    • hourly-dedup materialized view  : mv_rainfall_hourly   (silver)
+    • Raw 10-minute readings          : public.rainfall      (bronze)
+    • Hourly-dedup materialized view  : mv_rainfall_hourly   (silver)
 
-The app offers four lenses:
-
-    1.  Live rainfall  (last reading, mm in past hour)
+Dashboard lenses
+    1.  Live rainfall (last reading, mm in past hour)
     2.  Daily rainfall between dates (sum of hourly values)
     3.  Hourly rainfall for a chosen day
     4.  Dry vs Wet days between dates
-
-Author
-    Gabriel <gmm.maire@gmail.com>
 """
 
 # ---------------------------------------------------------------------------#
 # Imports                                                                    #
 # ---------------------------------------------------------------------------#
 from datetime import date, datetime, timedelta
+import os
+
+import altair as alt
 import pandas as pd
 import sqlalchemy as sa
 import streamlit as st
-import altair as alt
-import os
 
 # ---------------------------------------------------------------------------#
-# Configuration                                                              #
+# Config                                                                     #
 # ---------------------------------------------------------------------------#
-DB_URL = os.environ["DATABASE_URL"]
+DB_URL = os.environ["DATABASE_URL"]  # picked up from .env or docker-compose
 engine = sa.create_engine(DB_URL, pool_pre_ping=True)
 
 st.set_page_config(page_title="RainWise Dashboard", layout="wide")
 
-CACHE_TTL_LONG  = 3600   # 1 h – city list
-CACHE_TTL_SHORT = 300    # 5 min – live & MV queries
+TTL_LONG  = 3600   # 1 h  – city list cache
+TTL_SHORT = 300    # 5 min – live & query caches
 
 # ---------------------------------------------------------------------------#
-# Helper queries                                                             #
+# Helper utils                                                               #
 # ---------------------------------------------------------------------------#
 def rows_to_df(result: sa.Result) -> pd.DataFrame:
     """Convert SQLAlchemy Result → pandas DataFrame."""
-    df = pd.DataFrame(result.fetchall(), columns=result.keys())
-    return df
+    return pd.DataFrame(result.fetchall(), columns=result.keys())
 
 
-@st.cache_data(ttl=CACHE_TTL_LONG)
+@st.cache_data(ttl=TTL_LONG)
 def get_cities() -> list[str]:
+    """Distinct city list for dropdown."""
     q = sa.text("SELECT DISTINCT city FROM public.rainfall ORDER BY city")
     with engine.begin() as conn:
         return [r[0] for r in conn.execute(q)]
 
 
-@st.cache_data(ttl=CACHE_TTL_SHORT)
+@st.cache_data(ttl=TTL_SHORT)
 def get_live_rain(city: str) -> float | None:
+    """Latest rainfall_mm for the chosen city."""
     q = sa.text(
         "SELECT rainfall_mm FROM public.rainfall "
         "WHERE city = :city ORDER BY record_ts DESC LIMIT 1"
@@ -66,25 +63,32 @@ def get_live_rain(city: str) -> float | None:
     return None if row is None else row[0]
 
 
-@st.cache_data(ttl=CACHE_TTL_SHORT)
+@st.cache_data(ttl=TTL_SHORT)
 def fetch_daily(city: str, start: date, end: date) -> pd.DataFrame:
+    """
+    Daily totals from MV (half-open interval: start inclusive, end exclusive).
+    Ensures each calendar day is counted exactly once.
+    """
     q = sa.text(
         """
         SELECT date(hour_ts) AS day,
                SUM(rainfall_mm)::numeric(6,2) AS total_mm
         FROM public.mv_rainfall_hourly
         WHERE city = :city
-          AND hour_ts BETWEEN :start AND :end
+          AND hour_ts >= :start
+          AND hour_ts <  :end
         GROUP BY day
         ORDER BY day
         """
     )
+    params = {"city": city, "start": start, "end": end + timedelta(days=1)}
     with engine.begin() as conn:
-        return rows_to_df(conn.execute(q, {"city": city, "start": start, "end": end}))
+        return rows_to_df(conn.execute(q, params))
 
 
-@st.cache_data(ttl=CACHE_TTL_SHORT)
+@st.cache_data(ttl=TTL_SHORT)
 def fetch_hourly(city: str, day: date) -> pd.DataFrame:
+    """All hourly rows for a given UTC day."""
     q = sa.text(
         """
         SELECT hour_ts, rainfall_mm
@@ -98,8 +102,9 @@ def fetch_hourly(city: str, day: date) -> pd.DataFrame:
         return rows_to_df(conn.execute(q, {"city": city, "d": day}))
 
 
-@st.cache_data(ttl=CACHE_TTL_SHORT)
+@st.cache_data(ttl=TTL_SHORT)
 def dry_wet_ratio(city: str, start: date, end: date) -> tuple[int, int]:
+    """Number of wet vs dry days in [start, end] range (half-open interval)."""
     q = sa.text(
         """
         WITH daily AS (
@@ -107,7 +112,8 @@ def dry_wet_ratio(city: str, start: date, end: date) -> tuple[int, int]:
                  SUM(rainfall_mm) AS mm
           FROM public.mv_rainfall_hourly
           WHERE city = :city
-            AND hour_ts BETWEEN :start AND :end
+            AND hour_ts >= :start
+            AND hour_ts <  :end
           GROUP BY d
         )
         SELECT
@@ -116,20 +122,20 @@ def dry_wet_ratio(city: str, start: date, end: date) -> tuple[int, int]:
         FROM daily
         """
     )
+    params = {"city": city, "start": start, "end": end + timedelta(days=1)}
     with engine.begin() as conn:
-        dry, wet = conn.execute(q, {"city": city, "start": start, "end": end}).fetchone()
+        dry, wet = conn.execute(q, params).fetchone()
     return dry, wet
 
 # ---------------------------------------------------------------------------#
-# Visualization Fonctions                                                    #
+# Viz helpers                                                                #
 # ---------------------------------------------------------------------------#
 def _fill_missing_days(df: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
-    """Add every day in [start, end] with 0 mm if it’s absent from the query."""
+    """Ensure every day in range has a row (0 mm if missing)."""
     df = df.copy()
     df["day"] = pd.to_datetime(df["day"])
-
-    all_days = pd.date_range(start, end, freq="D")
-    filled   = (
+    all_days  = pd.date_range(start, end, freq="D")
+    filled    = (
         pd.DataFrame({"day": all_days})
         .merge(df, on="day", how="left")
         .fillna({"total_mm": 0})
@@ -137,28 +143,33 @@ def _fill_missing_days(df: pd.DataFrame, start: date, end: date) -> pd.DataFrame
     filled["total_mm"] = filled["total_mm"].astype(float)
     return filled
 
+
 def chart_daily(df: pd.DataFrame) -> alt.Chart:
+    """Bar chart — one bar per day (ordinal axis prevents duplicates)."""
+    df = df.copy()
+    df["day_str"] = df["day"].dt.strftime("%Y-%m-%d")
     max_mm = df["total_mm"].max() or 1.0
 
     return (
         alt.Chart(df)
         .mark_bar(color="#1f77b4")
         .encode(
-            x=alt.X("day:T",
-                    title="Day",
-                    axis=alt.Axis(format="%Y-%m-%d")),     # date only
+            x=alt.X("day_str:O", title="Day"),  # ordinal
             y=alt.Y("total_mm:Q",
                     title="Rainfall (mm)",
                     scale=alt.Scale(domain=[0, max_mm * 1.1]),
                     axis=alt.Axis(format=".2f")),
-            tooltip=[alt.Tooltip("day:T"),
-                     alt.Tooltip("total_mm:Q", format=".2f")],
+            tooltip=[
+                alt.Tooltip("day_str:N", title="Day"),
+                alt.Tooltip("total_mm:Q", format=".2f")
+            ],
         )
         .properties(height=300)
     )
 
 
 def chart_hourly(df: pd.DataFrame) -> alt.Chart:
+    """Interval bar chart: each bar spans start_hour → end_hour (UTC)."""
     if df.empty:
         return alt.Chart(pd.DataFrame())
 
@@ -199,28 +210,20 @@ def chart_hourly(df: pd.DataFrame) -> alt.Chart:
 
 
 def chart_drywet(wet: int, dry: int) -> alt.Chart:
-    df = pd.DataFrame({
-        "Type": ["Wet days", "Dry days"],
-        "Count": [wet, dry]
-    })
-
-    color_map = {
-        "Wet days": "#1f77b4",   # blue
-        "Dry days": "#ff7f0e"    # orange
-    }
+    """Donut chart (Wet = blue, Dry = orange)."""
+    df = pd.DataFrame(
+        {"Type": ["Wet days", "Dry days"], "Count": [wet, dry]}
+    )
+    palette = {"Wet days": "#1f77b4", "Dry days": "#ff7f0e"}
 
     return (
         alt.Chart(df)
         .mark_arc(innerRadius=50, outerRadius=100)
         .encode(
-            theta=alt.Theta("Count:Q"),
-            color=alt.Color(
-                "Type:N",
-                scale=alt.Scale(
-                    domain=list(color_map.keys()),
-                    range=list(color_map.values())
-                )
-            ),
+            theta="Count:Q",
+            color=alt.Color("Type:N",
+                            scale=alt.Scale(domain=list(palette.keys()),
+                                            range=list(palette.values()))),
             tooltip=["Type:N", "Count:Q"]
         )
         .properties(height=300)
@@ -251,17 +254,17 @@ tab_live, tab_daily, tab_hourly, tab_drywet = st.tabs(
     ["💧 Live", "📆 Daily", "🕐 Hourly", "🌤 Dry vs Wet"]
 )
 
-# 1. Live
+# 💧 Live
 with tab_live:
     st.subheader(f"Live rainfall — {city}")
     val = get_live_rain(city)
     st.metric("Rainfall last hour (mm)", f"{val:.2f}" if val is not None else "–")
 
-# 2. Daily 
+# 📆 Daily
 with tab_daily:
     st.subheader(f"Daily rainfall in {city}")
     df_day_raw = fetch_daily(city, start_date, end_date)
-    df_day = _fill_missing_days(df_day_raw, start_date, end_date)
+    df_day     = _fill_missing_days(df_day_raw, start_date, end_date)
     if df_day.empty:
         st.info("No data for selected period.")
     else:
@@ -273,7 +276,7 @@ with tab_daily:
             file_name="rainwise_daily.csv",
         )
 
-# 3. Hourly 
+# 🕐 Hourly
 with tab_hourly:
     chosen_day = st.date_input(
         "Choose day", value=today, max_value=today, min_value=start_date, key="day_input"
@@ -283,11 +286,10 @@ with tab_hourly:
     if df_hour.empty:
         st.info("No data for that day.")
     else:
-    #   st.line_chart(df_hour.set_index("hour_ts"))
         st.altair_chart(chart_hourly(df_hour), use_container_width=True)
         st.caption("Rainfall measured over each hour (UTC)")
 
-# 4. Dry vs Wet
+# 🌤 Dry vs Wet
 with tab_drywet:
     dry, wet = dry_wet_ratio(city, start_date, end_date)
     total = dry + wet
@@ -303,5 +305,5 @@ with tab_drywet:
 # Footer                                                                     #
 # ---------------------------------------------------------------------------#
 st.caption(
-    "Sources: OpenWeatherMap • Pipeline: Apache Airflow • Validation: Great Expectations • Storage: Postgres + Materialized View"
+    "Sources: OpenWeatherMap • Pipeline: Apache Airflow • Validation: Great Expectations • Storage: PostgreSQL + MV"
 )
